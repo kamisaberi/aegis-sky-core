@@ -1,146 +1,184 @@
 # Aegis Sky Core: The Aura Perception Engine
 
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
-![Standard](https://img.shields.io/badge/std-c%2B%2B20-blue)
-![Platform](https://img.shields.io/badge/platform-NVIDIA%20Jetson%20Orin-green)
-![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900)
-![License](https://img.shields.io/badge/license-Proprietary-red)
+**Current Version:** 3.1.0-alpha
+**Target Platform:** NVIDIA Jetson AGX Orin (JetPack 6.0 / L4T 36.3)
+**Standard:** C++20 / CUDA 12.2
 
-> **"In the era of asymmetric warfare, latency is the only metric that matters."**
+## Executive Summary
 
-**Aegis Sky Core** is the embedded software stack powering the **Aegis Sentry** autonomous defense pod. It is a hyper-optimized, real-time C++20/CUDA system designed to detect, track, and engage Class 1 & 2 UAS threats (drones) with superhuman speed and precision.
+**Aegis Sky Core** is the high-performance embedded software stack powering the **Aegis Sentry** autonomous defense system. It serves as the "brain" of the Sentry pod, responsible for the real-time detection, classification, tracking, and engagement of asymmetric aerial threats, specifically Class 1 and Class 2 Unmanned Aerial Systems (UAS).
 
-Unlike legacy air defense systems, Aegis Sky utilizes **Early Sensor Fusion** and the proprietary **xInfer** engine to achieve an end-to-end loop time of **< 50 milliseconds**.
+The system is architected to solve the **Latency Crisis** in modern air defense. By leveraging a proprietary "Early Fusion" architecture and the internal **xInfer** runtime, Aegis Sky Core achieves a sensor-to-effector loop time of **under 50 milliseconds**, providing a decisive advantage against high-speed FPV (First-Person View) drones and autonomous swarms.
 
----
-
-## 🚀 Key Technical Features
-
-### ⚡ Zero-Copy Architecture
-We do not move data; we move pointers.
-*   **Direct DMA Access:** Sensor drivers (GigE Vision, 4D Radar) write directly to pinned GPU memory.
-*   **Ring Buffers:** A lock-free shared memory transport moves data between services without CPU intervention.
-
-### 🧠 The "Aura" Fusion Engine
-*   **Raw Data Fusion:** We fuse Radar Point Clouds and RGB pixels *before* the Neural Network input layer.
-*   **Custom Kernels:** Proprietary CUDA kernels project 3D Doppler data onto 2D visual feature maps in real-time.
-*   **xInfer Integration:** Powered by our internal `xInfer` runtime, utilizing fused TensorRT engines for max throughput on Jetson Orin.
-
-### 🧩 Massive Modularity
-*   **Plugin System:** Drivers and Algorithms are compiled as dynamic shared libraries (`.so`).
-*   **Hot-Swappable:** Switch from a simulation driver to a hardware driver via config, without recompiling the core.
-*   **Strict Contracts:** Public Interfaces (`include/`) are strictly separated from Private Implementation (`src/`).
+This repository contains the core logic, hardware abstraction layers, and service orchestration modules. It links against the proprietary `xInfer` and `xTorch` libraries for underlying tensor operations.
 
 ---
 
-## 🏗️ System Architecture
+## Architectural Philosophy
 
-The system follows a strict **Service-Oriented Architecture (SOA)** tailored for embedded Linux.
+The Aegis Sky architecture is built upon three non-negotiable engineering pillars:
+
+### 1. Zero-Copy Data Transport
+In high-frequency perception loops, memory bandwidth is the primary bottleneck. Aegis Sky Core enforces a strict Zero-Copy policy:
+*   **Direct Memory Access (DMA):** Sensor drivers (GigE Vision, 4D Radar, LiDAR) write raw data directly into pinned (page-locked) GPU memory.
+*   **Pointer Passing:** Services do not exchange data objects; they exchange pointers to shared memory ring buffers. A video frame captured by the HAL is read by the Fusion Engine and the Recorder Service simultaneously without a single CPU memory copy.
+
+### 2. Service-Oriented Architecture (SOA)
+The system is decomposed into isolated, hot-swappable services that communicate via a high-performance middleware bus. This ensures:
+*   **Fault Isolation:** If the Telemetry Service crashes, the Fire Control Service continues to function.
+*   **Hardware Agnosticism:** The Fusion Service communicates with an abstract `ICamera` interface. The underlying implementation (Basler GigE vs. NVIDIA Argus) is loaded as a dynamic plugin at runtime based on configuration.
+
+### 3. Deterministic Execution
+To guarantee engagement safety, the system must operate deterministically.
+*   **Real-Time Scheduling:** Critical threads (Fusion, Tracking) run with `SCHED_FIFO` Linux priority to preempt standard OS tasks.
+*   **Static Allocation:** All critical memory structures (Tensor buffers, Track lists) are pre-allocated at boot time. No `malloc` or `new` operations occur inside the "Hot Loop."
+
+---
+
+## System Architecture Diagram
+
+The data flow follows a strictly defined pipeline from hardware ingestion to kinetic response.
 
 ```mermaid
 graph TD
-    HW[Hardware Layer (Sensors)] --> HAL[HAL Plugins (Drivers)]
-    HAL -->|Zero-Copy DMA| BUS[Middleware Bus (Shared Mem)]
+    subgraph Hardware_Layer
+        CAM[Camera Sensors]
+        RAD[4D Radar]
+        PTU[Pan-Tilt Unit]
+    end
 
-    BUS --> FUSION[Fusion Service]
-    FUSION -->|Fused Tensor| PERC[Perception Service (xInfer)]
-    PERC -->|Detections| TRACK[Tracking Service (Kalman)]
-    TRACK -->|Tracks| FIRE[Fire Control Service]
+    subgraph HAL_Plugins
+        Dr_CAM[GigE / MIPI Drivers]
+        Dr_RAD[CAN-FD / UDP Drivers]
+        Dr_PTU[Serial Controller]
+    end
 
-    FIRE -->|Commands| EFF[Effector HAL]
+    subgraph Middleware_Bus
+        SHM[Shared Memory Transport]
+    end
+
+    subgraph Core_Services
+        FUSION[Fusion Service]
+        PERC[Perception Service]
+        TRACK[Tracking Service]
+        FIRE[Fire Control Service]
+    end
+
+    CAM --> Dr_CAM
+    RAD --> Dr_RAD
+
+    Dr_CAM -->|Write GPU Ptr| SHM
+    Dr_RAD -->|Write Cloud| SHM
+
+    SHM -->|Read Sync| FUSION
+    FUSION -->|Fused Tensor| PERC
+    PERC -->|Detections| TRACK
+    TRACK -->|State Vectors| FIRE
+
+    FIRE -->|Commands| Dr_PTU
+    Dr_PTU --> PTU
 ```
 
 ---
 
-## 📂 Project Structure
+## Repository Structure
 
-We enforce a strict separation between **Contracts** (Public) and **Logic** (Private).
+The codebase adheres to a strict separation between **Public Contracts** and **Private Implementation**. This allows the Core Engine to scale to millions of lines of code while maintaining clean dependency graphs.
 
-```text
-aegis-sky-core/
-├── cmake/                  # Build modules (FindxInfer.cmake, Toolchains)
-├── configs/                # Runtime YAML configurations
-│
-├── include/aegis/          # [PUBLIC] The Contracts (Headers Only)
-│   ├── core/               # Primitive types (UUID, Timestamp)
-│   ├── hal/                # Abstract Hardware Interfaces (ICamera.h, IRadar.h)
-│   └── messages/           # Data Transfer Objects (PointClouds, Tracks)
-│
-├── src/                    # [PRIVATE] The Implementation (Source Code)
-│   ├── platform/           # OS Wrappers (Memory, Threading, Time)
-│   ├── middleware/         # IPC & Shared Memory Transport
-│   ├── drivers/            # Hardware Plugins (GigE, CAN-FD, Serial)
-│   └── services/           # The Core Logic (Fusion, Perception, Tracking)
-│
-├── tests/                  # GoogleTest Suites
-└── tools/                  # Calibration & Replay Utilities
-```
+### `include/aegis/` (The Public Contract)
+This directory contains only header files (`.h`). It defines *what* the system does, but not *how*. Other modules rely solely on these files.
+*   **`core/`**: Fundamental types, logging interfaces, and error handling definitions.
+*   **`hal/`**: Pure virtual interfaces for hardware (e.g., `ICamera`, `IRadar`, `IEffector`). Any sensor vendor must implement these interfaces to be compatible with Aegis Sky.
+*   **`messages/`**: Data Transfer Objects (DTOs) used for inter-service communication. These are aligned with Flatbuffers/Protobuf definitions.
+*   **`math/`**: Optimized linear algebra structures (Matrix4x4, Quaternion) used for coordinate transformations.
+
+### `src/` (The Private Implementation)
+This directory contains the source code (`.cpp`) and internal logic.
+*   **`platform/`**: Low-level OS wrappers for Linux/Jetson (Memory allocators, Thread scheduling, PTP Time synchronization).
+*   **`middleware/`**: Implementation of the Inter-Process Communication (IPC) bus and shared memory managers.
+*   **`drivers/`**: The implementation of the HAL interfaces. Each folder here (e.g., `drivers/cameras/gige_basler`) compiles into a separate shared object (`.so`) plugin.
+*   **`services/`**: The core business logic:
+    *   **`fusion/`**: Contains the CUDA kernels for projecting 3D radar points onto 2D image planes.
+    *   **`perception/`**: Wraps the `xInfer` runtime to execute TensorRT engines.
+    *   **`tracking/`**: Implements Extended Kalman Filters (EKF) and data association algorithms (Hungarian/Munkres).
+    *   **`fire_control/`**: Ballistics solvers and Rules of Engagement (ROE) safety checks.
 
 ---
 
-## 🛠️ Dependencies & Prerequisites
+## Core Dependencies
 
-This project relies on the **Ignition AI Ecosystem**. Ensure these are installed in your system path or provided via CMake.
+Aegis Sky Core is the application layer. It relies on the **Ignition AI** infrastructure stack for deep learning capabilities.
 
-1.  **Hardware:** NVIDIA Jetson AGX Orin (JetPack 6.0+) or x86_64 w/ RTX GPU (Sim Mode).
-2.  **Core Libraries (Proprietary):**
-    *   **[xInfer](https://github.com/ignition-ai/xinfer)** (Runtime v2.1+) - *Required*
-    *   **[xTorch](https://github.com/ignition-ai/xtorch)** (Optional, for online learning)
-3.  **Third Party:**
-    *   CUDA Toolkit 12.2+
-    *   TensorRT 8.6+
-    *   OpenCV 4.8 (with CUDA support)
-    *   Protobuf & gRPC
+1.  **xInfer (Runtime):** The proprietary high-performance inference engine. Aegis Sky links against `libxinfer.so` to load and execute fused neural network models.
+2.  **xTorch (Training):** The C++ training library. Used primarily in the "Online Learning" module to update model weights based on field data.
+3.  **CUDA Toolkit (12.x):** Required for all sensor processing and fusion kernels.
+4.  **TensorRT (8.x):** Backend for the `xInfer` builder.
+5.  **OpenCV (4.x with CUDA):** Used for legacy image handling and visualization (not used in the critical path).
 
 ---
 
-## 🔨 Build Instructions
+## Build Instructions
 
-We use **CMake** and **Ninja** for high-speed parallel builds.
+The project uses CMake with a modular target system.
 
+### Prerequisites
+*   Ubuntu 22.04 LTS (or Jetson Linux)
+*   GCC 11+ or Clang 14+
+*   Ninja Build System
+
+### Compilation Steps
+
+1.  **Configure the Build:**
+    Select the target platform. Use `x86_64` for simulation or `JETSON_ORIN` for hardware deployment.
+    ```bash
+    cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DAEGIS_PLATFORM=JETSON_ORIN \
+        -DCMAKE_PREFIX_PATH="/opt/ignition/xinfer;/opt/ignition/xtorch"
+    ```
+
+2.  **Build the Core & Plugins:**
+    ```bash
+    cmake --build build --parallel $(nproc)
+    ```
+
+3.  **Install System-Wide:**
+    This installs the binaries to `/usr/local/bin` and plugins to `/usr/local/lib/aegis/plugins`.
+    ```bash
+    sudo cmake --install build
+    ```
+
+---
+
+## Usage & Configuration
+
+The system is data-driven. Behavior is defined by YAML configuration files located in `configs/`.
+
+### Running in Simulation Mode
+To test the logic without physical hardware, use the Replay Driver plugin.
 ```bash
-# 1. Clone the repository
-git clone https://github.com/ignition-ai/aegis-sky-core.git
-cd aegis-sky-core
-
-# 2. Configure the project (Release Mode)
-cmake -B build -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DAEGIS_PLATFORM=JETSON_ORIN
-
-# 3. Compile
-cmake --build build --parallel $(nproc)
-
-# 4. Install (Optional)
-sudo cmake --install build
+aegis_core --config configs/simulation/scenario_desert_swarm.yaml
 ```
+*Note: This will load pre-recorded sensor logs from `data/logs/` and inject them into the fusion engine.*
 
----
-
-## 🖥️ Running the Engine
-
-The system is controlled via the `aegis-supervisor` daemon.
-
-**1. Simulation Mode (No Hardware):**
+### Running in Deployment Mode
+For live operations on the Jetson AGX Orin:
 ```bash
-./build/bin/aegis_core --config configs/simulation/desert_scenario.yaml
+sudo aegis_supervisor --config configs/deployment/base_defense_v1.yaml
 ```
-
-**2. Deployment Mode:**
-```bash
-# Requires root for SCHED_FIFO priority and GPIO access
-sudo ./build/bin/aegis_core --config configs/deployment/live_fire_v1.yaml
-```
+*Note: `sudo` is required to access GPIO pins (for the effector) and to set `SCHED_FIFO` thread priorities.*
 
 ---
 
-## 📜 License & Confidentiality
+## Legal & Compliance
 
-**Copyright © 2025 Aegis Sky, Inc. All Rights Reserved.**
+**Copyright © 2025 Aegis Sky, Inc.**
 
-*NOTICE: This software contains proprietary trade secrets and is protected by international copyright laws. Unauthorized reproduction, distribution, or reverse engineering of the `src/` directory is strictly prohibited.*
+**Proprietary & Confidential**
+This source code is the sole property of Aegis Sky, Inc. Any reproduction, distribution, or reverse engineering of the software architecture, fusion algorithms, or driver implementations without express written permission is strictly prohibited.
 
-*This software may be subject to export control regulations (ITAR/EAR).*
+**Export Control Notice**
+This software may be capable of controlling defense articles. It is subject to the export control laws of the United States (ITAR) and/or applicable international arms regulations. Transfer of this source code to foreign nationals or entities may require a valid export license.
 
----
-**Maintained by the Aegis Sky Skunkworks Team.**
+**Maintenance**
+Maintained by the Aegis Sky Advanced Projects Group (Skunkworks).
